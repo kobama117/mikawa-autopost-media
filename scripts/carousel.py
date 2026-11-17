@@ -55,6 +55,7 @@ def content(out, heading, items, idx, total, palette):
         d.text((80, y), '■ ' + it['name'], font=fn, fill=accent); y += 96
         for ln in wrap(d, it['text'], ft, W - 180): d.text((110, y), ln, font=ft, fill=(255, 255, 255)); y += 68
         y += 64
+    if y > H - 60: raise ValueError(f'layout overflow: {heading}')
     return im.save(out, quality=92)
 
 PALETTES = [((74, 28, 22), (140, 52, 30), (255, 214, 150)), ((34, 58, 44), (70, 100, 60), (255, 226, 150)),

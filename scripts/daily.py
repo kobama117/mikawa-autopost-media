@@ -90,9 +90,37 @@ def cmd_pick():
     text = clean_article(b['content']['rendered'])
     heads = re.findall(r'^## (.+)$', text, flags=re.M)
     print(json.dumps({'candidate': pick, 'top_candidates': [(x['title'], round(x['score'], 1)) for x in cands[:6]],
-                      'headings': heads[:30], 'article_text': text[:7000], 'today': str(TODAY)}, ensure_ascii=False, indent=1))
+                      'headings': heads[:30], 'article_text': text[:7000], 'today': str(TODAY),
+                      'suggested_format': 'reel' if TODAY.weekday() == 6 else 'carousel'}, ensure_ascii=False, indent=1))
+
+def validate_carousel(spec):
+    errs = []
+    for k in ('source', 'post_id', 'url', 'title', 'tag', 'slides', 'cta_heading', 'cta_name', 'cta_text', 'bg_prompt', 'ig_caption', 'threads_text', 'slug'):
+        if not spec.get(k): errs.append('missing ' + k)
+    if errs: return errs
+    if len(spec['title']) > 14: errs.append('title too long (<=14)')
+    if len(spec['tag']) > 16: errs.append('tag too long (<=16)')
+    sl = spec['slides']
+    if not 3 <= len(sl) <= 7: errs.append('slides must be 3-7')
+    ng = re.compile(r'\d[\d,]*円|料金|営業時間|口コミ|ランキング')
+    for i, s in enumerate(sl):
+        if len(s.get('heading', '')) > 14: errs.append(f'slide{i+1} heading too long (<=14)')
+        its = s.get('items') or []
+        if not 1 <= len(its) <= 3: errs.append(f'slide{i+1} items must be 1-3')
+        for it in its:
+            if len(it.get('name', '')) > 14: errs.append(f'slide{i+1} name too long (<=14)')
+            if len(it.get('text', '')) > 40: errs.append(f'slide{i+1} text too long (<=40)')
+            if ng.search(it.get('name', '') + it.get('text', '')): errs.append(f'slide{i+1} has price/hours/reviews')
+    if 'AI生成' not in spec['ig_caption'] or 'AI生成' not in spec['threads_text']: errs.append('AI note missing')
+    if re.search(r'https?://', spec['ig_caption']): errs.append('url in ig caption')
+    if spec['url'] not in spec['threads_text']: errs.append('article url missing in threads')
+    if len(spec['threads_text']) > 480: errs.append('threads too long')
+    if len(spec['ig_caption']) > 2000: errs.append('ig too long')
+    if not re.fullmatch(r'[a-z0-9\-]+', spec['slug']): errs.append('slug must be [a-z0-9-]')
+    return errs
 
 def validate(spec):
+    if 'slides' in spec: return validate_carousel(spec)
     errs = []
     for k in ('source', 'post_id', 'url', 'title', 'tag', 'fact', 'bg_prompt', 'ig_caption', 'threads_text', 'slug'):
         if not spec.get(k): errs.append('missing ' + k)
@@ -130,13 +158,52 @@ def push(msg, keys):
         if r.returncode == 0: return
     raise RuntimeError('push failed: ' + scrub(r.stderr, keys)[:300])
 
+def cleanup_old(keys_dir, days=7):
+    cut = TODAY - datetime.timedelta(days=days)
+    base = os.path.join(REPO_DIR, keys_dir)
+    if not os.path.isdir(base): return
+    for f in os.listdir(base):
+        m = re.match(r'(\d{4}-\d{2}-\d{2})_', f)
+        if m and datetime.date.fromisoformat(m.group(1)) < cut:
+            p = os.path.join(base, f); shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+
+def publish_carousel(spec, bg, work, dry, keys):
+    import carousel
+    rel = f"carousels/{TODAY}_{spec['slug']}"; outdir = os.path.join(REPO_DIR, rel)
+    try: paths = carousel.build(spec, outdir, bg)
+    except ValueError as e:
+        print(json.dumps({'ok': False, 'validation_errors': [str(e)]}, ensure_ascii=False)); sys.exit(2)
+    shutil.copy(paths[0], '/tmp/autopost_last_cover.jpg')
+    res = {'ok': True, 'dry_run': dry, 'format': 'info_carousel', 'images': rel, 'count': len(paths), 'date': str(TODAY)}
+    if dry:
+        print(json.dumps(res, ensure_ascii=False)); return
+    push(f'carousel {TODAY}', keys)
+    urls = [RAW + rel + '/' + os.path.basename(p) for p in paths]
+    for _ in range(12):
+        c, _b = http('GET', urls[-1], timeout=60)
+        if c == 200: break
+        time.sleep(5)
+    else: raise RuntimeError('raw url not reachable')
+    from poster import post_ig_carousel, post_threads_carousel
+    for name, fn, arg in (('instagram', post_ig_carousel, spec['ig_caption']), ('threads', post_threads_carousel, spec['threads_text'])):
+        try: res[name] = fn(urls, arg, keys=keys, dry=False)
+        except Exception as e: res[name] = {'error': scrub(str(e), keys)[:300]}
+    hist = load_history()
+    if any('permalink' in res.get(n, {}) for n in ('instagram', 'threads')):
+        hist.append({'date': str(TODAY), 'source': spec['source'], 'post_id': spec['post_id'], 'url': spec['url'], 'title': spec['title'],
+                     'format': 'info_carousel', 'images': rel, 'instagram': res.get('instagram', {}).get('permalink'), 'threads': res.get('threads', {}).get('permalink')})
+        json.dump(hist, open(os.path.join(REPO_DIR, 'data/history.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+    cleanup_old('carousels'); cleanup_old('reels')
+    push(f'history {TODAY}', keys)
+    print(json.dumps(res, ensure_ascii=False))
+
 def cmd_publish(spec_path):
     spec = json.load(open(spec_path, encoding='utf-8'))
     errs = validate(spec)
     if errs: print(json.dumps({'ok': False, 'validation_errors': errs}, ensure_ascii=False)); sys.exit(2)
     dry = os.environ.get('SNS_DRY_RUN') == '1'
     keys = load_keys(); ensure_repo(keys)
-    if spec['url'] in recently_used(load_history()):
+    if spec['url'] in recently_used(load_history()) and os.environ.get('ALLOW_REUSE') != '1':
         print(json.dumps({'ok': False, 'error': 'article used within %d days' % REUSE_DAYS})); sys.exit(3)
     work = '/tmp/autopost_work'; shutil.rmtree(work, ignore_errors=True); os.makedirs(work)
     from muse import gen_bg; from make_reel import overlay, zoom_reel
@@ -146,6 +213,8 @@ def cmd_publish(spec_path):
         except Exception as e:
             log('bg retry', i, scrub(str(e), keys)); time.sleep(5)
     else: raise RuntimeError('image generation failed')
+    if 'slides' in spec:
+        return publish_carousel(spec, bg, work, dry, keys)
     card = os.path.join(work, 'card.png'); overlay(bg, card, spec['title'], spec['tag'], spec['fact'])
     rel = f"reels/{TODAY}_{spec['slug']}.mp4"; out = os.path.join(REPO_DIR, rel); os.makedirs(os.path.dirname(out), exist_ok=True)
     zoom_reel(card, out)

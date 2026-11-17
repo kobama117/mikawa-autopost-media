@@ -45,3 +45,49 @@ def post_threads_video(video_url, text, keys=None, dry=None):
     mid = b['id']
     c, p = http('GET', f'{TV}/{mid}?fields=permalink&access_token={t}')
     return {'id': mid, 'permalink': p.get('permalink') if isinstance(p, dict) else None}
+
+
+def _wait(url, field, keys, ok='FINISHED', tries=30):
+    for _ in range(tries):
+        time.sleep(4)
+        c, s = http('GET', url)
+        st = s.get(field) if isinstance(s, dict) else None
+        if st == ok: return
+        if st in ('ERROR', 'EXPIRED'): raise RuntimeError('media ' + scrub(s, keys)[:300])
+    raise RuntimeError('media timeout')
+
+def post_ig_carousel(image_urls, caption, keys=None, dry=None):
+    keys = keys or load_keys(); t = keys['FB_GRAPH_TOKEN']
+    if dry if dry is not None else os.environ.get('SNS_DRY_RUN') == '1':
+        return {'dry_run': True, 'images': len(image_urls), 'caption': caption}
+    kids = []
+    for u in image_urls:
+        c, b = http('POST', f'{GV}/{IG_ID}/media', FORM, _form({'image_url': u, 'is_carousel_item': 'true', 'access_token': t}))
+        if c != 200: raise RuntimeError('ig child ' + scrub(b, keys)[:300])
+        kids.append(b['id'])
+    for k in kids: _wait(f'{GV}/{k}?fields=status_code&access_token={t}', 'status_code', keys)
+    c, b = http('POST', f'{GV}/{IG_ID}/media', FORM, _form({'media_type': 'CAROUSEL', 'children': ','.join(kids), 'caption': caption, 'access_token': t}))
+    if c != 200: raise RuntimeError('ig carousel ' + scrub(b, keys)[:300])
+    cid = b['id']; _wait(f'{GV}/{cid}?fields=status_code&access_token={t}', 'status_code', keys)
+    c, b = http('POST', f'{GV}/{IG_ID}/media_publish', FORM, _form({'creation_id': cid, 'access_token': t}))
+    if c != 200: raise RuntimeError('ig publish ' + scrub(b, keys)[:300])
+    mid = b['id']; c, p = http('GET', f'{GV}/{mid}?fields=permalink&access_token={t}')
+    return {'id': mid, 'permalink': p.get('permalink') if isinstance(p, dict) else None}
+
+def post_threads_carousel(image_urls, text, keys=None, dry=None):
+    keys = keys or load_keys(); t = keys['THREADS_TOKEN']
+    if dry if dry is not None else os.environ.get('SNS_DRY_RUN') == '1':
+        return {'dry_run': True, 'images': len(image_urls), 'text': text}
+    kids = []
+    for u in image_urls[:20]:
+        c, b = http('POST', f'{TV}/me/threads', FORM, _form({'media_type': 'IMAGE', 'image_url': u, 'is_carousel_item': 'true', 'access_token': t}))
+        if c != 200: raise RuntimeError('threads child ' + scrub(b, keys)[:300])
+        kids.append(b['id'])
+    for k in kids: _wait(f'{TV}/{k}?fields=status&access_token={t}', 'status', keys)
+    c, b = http('POST', f'{TV}/me/threads', FORM, _form({'media_type': 'CAROUSEL', 'children': ','.join(kids), 'text': text, 'access_token': t}))
+    if c != 200: raise RuntimeError('threads carousel ' + scrub(b, keys)[:300])
+    cid = b['id']; _wait(f'{TV}/{cid}?fields=status&access_token={t}', 'status', keys)
+    c, b = http('POST', f'{TV}/me/threads_publish', FORM, _form({'creation_id': cid, 'access_token': t}))
+    if c != 200: raise RuntimeError('threads publish ' + scrub(b, keys)[:300])
+    mid = b['id']; c, p = http('GET', f'{TV}/{mid}?fields=permalink&access_token={t}')
+    return {'id': mid, 'permalink': p.get('permalink') if isinstance(p, dict) else None}
