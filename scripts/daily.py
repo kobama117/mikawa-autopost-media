@@ -37,6 +37,11 @@ def recently_used(hist):
     cut = TODAY - datetime.timedelta(days=REUSE_DAYS)
     return {h['url'] for h in hist if datetime.date.fromisoformat(h['date']) >= cut}
 
+def load_rewrites():
+    """リライト済み記事の一覧(data/rewrites.json)。リライト用プロジェクトが更新する。"""
+    try: return {r['url']: r for r in json.load(open(os.path.join(REPO_DIR, 'data/rewrites.json'), encoding='utf-8'))}
+    except Exception: return {}
+
 def fetch_toyohashi():
     out, page = [], 1
     while True:
@@ -71,7 +76,11 @@ def clean_article(h):
 def cmd_pick():
     hist = load_history(); used = recently_used(hist)
     cands = [c for c in fetch_toyohashi() if c['url'] not in used]
-    for c in cands: c['score'] = score(c)
+    rew = load_rewrites()
+    for c in cands:
+        c['score'] = score(c)
+        if c['url'] in rew and c['score'] > 0:
+            c['score'] *= 1.6; c['rewritten'] = rew[c['url']].get('date')
     cands = sorted([c for c in cands if c['score'] > 0], key=lambda c: -c['score'])
     if not cands:
         print(json.dumps({'error': 'no_candidate'}, ensure_ascii=False)); return
