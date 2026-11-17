@@ -4,7 +4,7 @@ def load_keys(retries=20, wait=1.0):
     """プロジェクトの鍵ファイルを読む。同期の合間に空になることがあるのでやり直す。"""
     for _ in range(retries):
         keys = {}
-        for p in glob.glob('/mnt/project/sns_keys*') + glob.glob('./sns_keys*'):
+        for p in glob.glob('/mnt/project/sns_keys*') + glob.glob('/tmp/sns_keys*') + glob.glob('./sns_keys*'):
             try:
                 for line in open(p, encoding='utf-8', errors='ignore'):
                     m = re.match(r'\s*([A-Z_]+)\s*=\s*(\S+)', line)
