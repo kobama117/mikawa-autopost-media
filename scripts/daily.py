@@ -158,6 +158,27 @@ def push(msg, keys):
         if r.returncode == 0: return
     raise RuntimeError('push failed: ' + scrub(r.stderr, keys)[:300])
 
+def title_used(hist, title, days=30):
+    cut = TODAY - datetime.timedelta(days=days)
+    return any(h.get('title') == title and datetime.date.fromisoformat(h['date']) >= cut for h in hist)
+
+def claim(spec, fmt, keys):
+    """投稿の直前に履歴へ『投稿中』を記録してpushする。途中で失敗しても再実行で二重投稿しないため。"""
+    hist = load_history()
+    hist.append({'date': str(TODAY), 'source': spec['source'], 'post_id': spec['post_id'], 'url': spec['url'], 'title': spec['title'], 'format': fmt, 'status': 'posting'})
+    os.makedirs(os.path.join(REPO_DIR, 'data'), exist_ok=True)
+    json.dump(hist, open(os.path.join(REPO_DIR, 'data/history.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+    push(f'claim {TODAY}', keys)
+
+def finish_history(url, res, extra):
+    hist = load_history()
+    for h in reversed(hist):
+        if h['url'] == url and h['date'] == str(TODAY) and h.get('status') == 'posting':
+            h.pop('status'); h.update(extra); h['instagram'] = res.get('instagram', {}).get('permalink'); h['threads'] = res.get('threads', {}).get('permalink')
+            if not (h['instagram'] or h['threads']): h['status'] = 'failed'
+            break
+    json.dump(hist, open(os.path.join(REPO_DIR, 'data/history.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+
 def cleanup_old(keys_dir, days=7):
     cut = TODAY - datetime.timedelta(days=days)
     base = os.path.join(REPO_DIR, keys_dir)
@@ -185,14 +206,11 @@ def publish_carousel(spec, bg, work, dry, keys):
         time.sleep(5)
     else: raise RuntimeError('raw url not reachable')
     from poster import post_ig_carousel, post_threads_carousel
+    claim(spec, 'info_carousel', keys)
     for name, fn, arg in (('instagram', post_ig_carousel, spec['ig_caption']), ('threads', post_threads_carousel, spec['threads_text'])):
         try: res[name] = fn(urls, arg, keys=keys, dry=False)
         except Exception as e: res[name] = {'error': scrub(str(e), keys)[:300]}
-    hist = load_history()
-    if any('permalink' in res.get(n, {}) for n in ('instagram', 'threads')):
-        hist.append({'date': str(TODAY), 'source': spec['source'], 'post_id': spec['post_id'], 'url': spec['url'], 'title': spec['title'],
-                     'format': 'info_carousel', 'images': rel, 'instagram': res.get('instagram', {}).get('permalink'), 'threads': res.get('threads', {}).get('permalink')})
-        json.dump(hist, open(os.path.join(REPO_DIR, 'data/history.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+    finish_history(spec['url'], res, {'format': 'info_carousel', 'images': rel})
     cleanup_old('carousels'); cleanup_old('reels')
     push(f'history {TODAY}', keys)
     print(json.dumps(res, ensure_ascii=False))
@@ -205,6 +223,8 @@ def cmd_publish(spec_path):
     keys = load_keys(); ensure_repo(keys)
     if spec['url'] in recently_used(load_history()) and os.environ.get('ALLOW_REUSE') != '1':
         print(json.dumps({'ok': False, 'error': 'article used within %d days' % REUSE_DAYS})); sys.exit(3)
+    if title_used(load_history(), spec['title']) and os.environ.get('ALLOW_REUSE') != '1':
+        print(json.dumps({'ok': False, 'validation_errors': ['同じtitleを30日以内に使用済み。別の切り口のtitleに変える（例: 「豊橋のデート夜景」）']}, ensure_ascii=False)); sys.exit(2)
     work = '/tmp/autopost_work'; shutil.rmtree(work, ignore_errors=True); os.makedirs(work)
     from muse import gen_bg; from make_reel import overlay, zoom_reel
     bg = os.path.join(work, 'bg.png')
@@ -230,15 +250,11 @@ def cmd_publish(spec_path):
         time.sleep(5)
     else: raise RuntimeError('raw url not reachable')
     from poster import post_ig_reel, post_threads_video
+    claim(spec, 'ai_mood_reel', keys)
     for name, fn, arg in (('instagram', post_ig_reel, spec['ig_caption']), ('threads', post_threads_video, spec['threads_text'])):
         try: res[name] = fn(url, arg, keys=keys, dry=False)
         except Exception as e: res[name] = {'error': scrub(str(e), keys)[:300]}
-    hist = load_history()
-    if any('permalink' in res.get(n, {}) for n in ('instagram', 'threads')):
-        hist.append({'date': str(TODAY), 'source': spec['source'], 'post_id': spec['post_id'], 'url': spec['url'], 'title': spec['title'],
-                     'format': 'ai_mood_reel', 'video': rel, 'instagram': res.get('instagram', {}).get('permalink'), 'threads': res.get('threads', {}).get('permalink')})
-        os.makedirs(os.path.join(REPO_DIR, 'data'), exist_ok=True)
-        json.dump(hist, open(os.path.join(REPO_DIR, 'data/history.json'), 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+    finish_history(spec['url'], res, {'format': 'ai_mood_reel', 'video': rel})
     # 7日より古い動画を消す
     cut = TODAY - datetime.timedelta(days=7)
     for f in os.listdir(os.path.join(REPO_DIR, 'reels')):
